@@ -1388,34 +1388,59 @@ int mdp_ppp_pipe_wait(void)
 #define MAX_VSYNC_GAP		4
 #define DEFAULT_FRAME_RATE	60
 
-static u32 mdp_get_panel_framerate(struct msm_fb_data_type *mfd)
+u32 mdp_get_panel_framerate(struct msm_fb_data_type *mfd)
 {
-	u32 frame_rate = 0, total_pixel;
+	u32 frame_rate = 0, pixel_rate = 0, total_pixel;
 	struct msm_panel_info *panel_info = &mfd->panel_info;
+
+	if ((panel_info->type == MIPI_VIDEO_PANEL ||
+	     panel_info->type == MIPI_CMD_PANEL) &&
+	     panel_info->mipi.frame_rate)
+	  frame_rate = panel_info->mipi.frame_rate;
+
 	if (mfd->dest == DISPLAY_LCD) {
-		if (panel_info->type == MDDI_PANEL && panel_info->mddi.is_type1)
-			frame_rate = panel_info->lcd.refx100 / (100 * 2);
-		else
-			frame_rate = panel_info->lcd.refx100 / 100;
-	} else {
-		if (panel_info->type == MIPI_VIDEO_PANEL) {
-			frame_rate = panel_info->mipi.frame_rate;
-		} else {
-			total_pixel = (panel_info->lcdc.h_back_porch +
-				  panel_info->lcdc.h_front_porch +
-				  panel_info->lcdc.h_pulse_width +
-				  panel_info->xres) *
-				 (panel_info->lcdc.v_back_porch +
-				  panel_info->lcdc.v_front_porch +
-				  panel_info->lcdc.v_pulse_width +
-				  panel_info->yres);
-			if (total_pixel)
-				frame_rate = panel_info->clk_rate /
-					total_pixel;
-		}
+	  if (panel_info->type == MDDI_PANEL && panel_info->mddi.is_type1)
+	    frame_rate = panel_info->lcd.refx100 / (100 * 2);
+	  else if (panel_info->type != MIPI_CMD_PANEL)
+	    frame_rate = panel_info->lcd.refx100 / 100;
 	}
-	if (frame_rate == 0)
+	pr_debug("%s type=%d frame_rate=%d\n", __func__,
+	  panel_info->type, frame_rate);
+
+	if (frame_rate)
+	  return frame_rate;
+
+	pixel_rate =
+	  (panel_info->type == MIPI_CMD_PANEL ||
+	   panel_info->type == MIPI_VIDEO_PANEL) ?
+	   panel_info->mipi.dsi_pclk_rate :
+	   panel_info->clk_rate;
+
+	if (!pixel_rate)
+	  pr_warn("%s pixel rate is zero\n", __func__);
+
+	total_pixel =
+	  (panel_info->lcdc.h_back_porch +
+	   panel_info->lcdc.h_front_porch +
+	   panel_info->lcdc.h_pulse_width +
+	   panel_info->xres) *
+	  (panel_info->lcdc.v_back_porch +
+	   panel_info->lcdc.v_front_porch +
+	   panel_info->lcdc.v_pulse_width +
+	   panel_info->yres);
+
+	if (total_pixel)
+	  frame_rate = pixel_rate / total_pixel;
+	else
+	  pr_warn("%s total pixels are zero\n", __func__);
+
+	if (frame_rate == 0) {
 		frame_rate = DEFAULT_FRAME_RATE;
+		pr_warn("%s frame rate=%d is default\n", __func__, frame_rate);
+	}
+	pr_debug("%s frame rate=%d total_pixel=%d, pixel_rate=%d\n", __func__,
+	  frame_rate, total_pixel, pixel_rate);
+
 	return frame_rate;
 }
 
@@ -2245,6 +2270,7 @@ static int mdp_on(struct platform_device *pdev)
 		}
 
 		mdp_clk_ctrl(0);
+		mdp4_overlay_reset();
 		mdp_pipe_ctrl(MDP_CMD_BLOCK, MDP_BLOCK_POWER_OFF, FALSE);
 	}
 
@@ -2870,13 +2896,12 @@ static int mdp_probe(struct platform_device *pdev)
 		mdp_pipe_ctrl(MDP_CMD_BLOCK, MDP_BLOCK_POWER_OFF, FALSE);
 	}
 
+	frame_rate = mdp_get_panel_framerate(mfd);
+  	if (frame_rate) {
+    		mfd->panel_info.frame_interval = 1000 / frame_rate;
+    		mfd->cpu_pm_hdl = add_event_timer(NULL, (void *)mfd);
+  	}
 	mdp_clk_ctrl(0);
-
-frame_rate = mdp_get_panel_framerate(mfd);
-  if (frame_rate) {
-    mfd->panel_info.frame_interval = 1000 / frame_rate;
-    mfd->cpu_pm_hdl = add_event_timer(NULL, (void *)mfd);
-  }
 
 #ifdef CONFIG_MSM_BUS_SCALING
 	if (!mdp_bus_scale_handle && mdp_pdata &&
